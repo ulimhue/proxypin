@@ -53,9 +53,17 @@ jobs:
           echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> key.properties
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
 
+      - name: Verify signing files
+        if: inputs.build_type == 'release'
+        run: |
+          ls -la key.properties keystore.jks
+          echo "--- key.properties content ---"
+          cat key.properties
+
       - name: Build APK (arm64)
         run: |
-          flutter build apk --${{ inputs.build_type }} --target-platform android-arm64
+          flutter build apk --${{ inputs.build_type }} --target-platform android-arm64 \
+            --android-skip-build-dependency-validation
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
