@@ -47,10 +47,10 @@ jobs:
       - name: Create signing config for release build
         if: inputs.build_type == 'release'
         run: |
-          echo "storeFile=../keystore.jks" > android/key.properties
-          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> android/key.properties
-          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
-          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
+          echo "storeFile=keystore.jks" > key.properties
+          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> key.properties
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
 
       - name: Build APK (arm64)
