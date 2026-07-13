@@ -30,17 +30,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            !~/.gradle/caches/*.lock
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/*.gradle*', 'android/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
       - name: Install dependencies
         run: flutter pub get
 
@@ -53,17 +42,10 @@ jobs:
           echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> key.properties
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
 
-      - name: Verify signing files
-        if: inputs.build_type == 'release'
-        run: |
-          ls -la key.properties keystore.jks
-          echo "--- key.properties content ---"
-          cat key.properties
-
       - name: Build APK (arm64)
         run: |
-          flutter build apk --${{ inputs.build_type }} --target-platform android-arm64 \
-            --android-skip-build-dependency-validation
+          cd android && ./gradlew clean && cd ..
+          flutter build apk --${{ inputs.build_type }} --target-platform android-arm64
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
