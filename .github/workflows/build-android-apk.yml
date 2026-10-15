@@ -28,6 +28,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: '3.47.7'
           cache: true
 
       - name: Install dependencies
@@ -43,9 +44,7 @@ jobs:
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/keystore.jks
 
       - name: Build APK (arm64)
-        run: |
-          cd android && ./gradlew clean && cd ..
-          flutter build apk --${{ inputs.build_type }} --target-platform android-arm64
+        run: flutter build apk --${{ inputs.build_type }} --target-platform android-arm64
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
