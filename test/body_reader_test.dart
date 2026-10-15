@@ -106,4 +106,84 @@ void main() {
       expect(utf8.decode(r2.body!), 'hello world');
     });
   });
+
+  group('BodyReader close-delimited detection (issue #844)', () {
+    test('no Content-Length and no chunked -> buffered, finalized on finish()', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'))..headers.contentType = 'text/plain';
+      final r = BodyReader(resp);
+      final result = r.readBody(_b('hello'));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isFalse);
+      expect(result.body, isNull);
+      final done = r.finish();
+      expect(done.isDone, isTrue);
+      expect(utf8.decode(done.body!), 'hello');
+    });
+
+    test('close-delimited accumulates across reads and finalizes on finish', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'))..headers.contentType = 'text/plain';
+      final r = BodyReader(resp);
+      expect(r.readBody(_b('hel')).isDone, isFalse);
+      expect(r.readBody(_b('lo')).isDone, isFalse);
+      final done = r.finish();
+      expect(done.isDone, isTrue);
+      expect(utf8.decode(done.body!), 'hello');
+    });
+
+    test('explicit Content-Length: 0 is NOT close-delimited', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'));
+      resp.headers.contentLength = 0;
+      final r = BodyReader(resp);
+      final result = r.readBody(_b(''));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isTrue);
+      expect(result.body, isEmpty);
+    });
+
+    test('204 without Content-Length is NOT close-delimited', () {
+      final resp = HttpResponse(HttpStatus(204, 'No Content'));
+      final r = BodyReader(resp);
+      final result = r.readBody(_b(''));
+      expect(result.supportedParse, isTrue);
+    });
+
+    test('chunked response is parsed, not close-delimited', () {
+      final r = BodyReader(_chunkedResponse());
+      final result = r.readBody(_b('5\r\nhello\r\n0\r\n\r\n'));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isTrue);
+    });
+
+    test('Transfer-Encoding: gzip, chunked is chunked-framed, not close-delimited', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'));
+      resp.headers.set(HttpHeaders.TRANSFER_ENCODING, 'gzip, chunked');
+      final r = BodyReader(resp);
+      final result = r.readBody(_b('5\r\nhello\r\n0\r\n\r\n'));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isTrue);
+      expect(utf8.decode(result.body!), 'hello');
+    });
+
+    test('Transfer-Encoding: gzip (without chunked) is close-delimited', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'));
+      resp.headers.set(HttpHeaders.TRANSFER_ENCODING, 'gzip');
+      final r = BodyReader(resp);
+      final result = r.readBody(_b('hello'));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isFalse);
+      final done = r.finish();
+      expect(utf8.decode(done.body!), 'hello');
+    });
+
+    test('multiple Transfer-Encoding header lines are combined before judging chunked', () {
+      final resp = HttpResponse(HttpStatus(200, 'OK'));
+      resp.headers.add(HttpHeaders.TRANSFER_ENCODING, 'gzip');
+      resp.headers.add(HttpHeaders.TRANSFER_ENCODING, 'chunked');
+      final r = BodyReader(resp);
+      final result = r.readBody(_b('5\r\nhello\r\n0\r\n\r\n'));
+      expect(result.supportedParse, isTrue);
+      expect(result.isDone, isTrue);
+      expect(utf8.decode(result.body!), 'hello');
+    });
+  });
 }

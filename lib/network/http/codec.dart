@@ -64,6 +64,13 @@ abstract interface class Decoder<T> {
   DecoderResult<T> decode(ChannelContext channelContext, ByteBuf byteBuf);
 }
 
+/// 支持在连接关闭时收尾 close-delimited（无 Content-Length / 无 chunked）
+/// 响应体的解码器。此类响应 body 由连接关闭定界，解码器先缓冲，待对端关闭后
+/// 由 [ChannelDispatcher.channelInactive] 调用本方法产出完整响应，
+abstract interface class CloseDelimitedBodyFinalizer {
+  DecoderResult? finishCloseDelimitedBody();
+}
+
 /// 编码
 abstract interface class Encoder<T> {
   List<int> encode(ChannelContext channelContext, T data);
@@ -76,7 +83,7 @@ abstract class Codec<D, E> implements Decoder<D>, Encoder<E> {
 }
 
 /// http编解码
-abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
+abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T>, CloseDelimitedBodyFinalizer {
   final HttpParse _httpParse = HttpParse();
   Http2Codec<T>? _h2Codec;
   State _state = State.readInitial;
@@ -84,6 +91,11 @@ abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
   late DecoderResult<T> result;
 
   BodyReader? bodyReader;
+
+  /// 由客户端编解码器在编码 CONNECT 时置位：下一个响应是该 CONNECT 的
+  /// "200 Connection established" 应答，没有 body。解码器在响应完成时自行
+  /// 消费清除，不依赖调用方设置 currentRequest，也无需调用方还原。
+  bool pendingConnectResponse = false;
 
   T createMessage(List<String> reqLine);
 
@@ -95,7 +107,17 @@ abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
   DecoderResult<T> decode(ChannelContext channelContext, ByteBuf data) {
     var protocol = channelContext.clientChannel?.selectedProtocol;
 
-    if (protocol == HttpConstants.h2 || protocol == HttpConstants.h2_14) {
+    if (this is HttpRequestCodec &&
+        _state == State.readInitial &&
+        channelContext.clientChannel?.isSsl != true &&
+        Http2Codec.hasConnectionPrefacePrefix(data)) {
+      if (data.readableBytes() < Http2Codec.connectionPrefacePRI.length) {
+        return DecoderResult<T>(isDone: false);
+      }
+      channelContext.isHttp2PriorKnowledge = true;
+    }
+
+    if (channelContext.isHttp2PriorKnowledge || protocol == HttpConstants.h2 || protocol == HttpConstants.h2_14) {
       return getH2Codec().decode(channelContext, data);
     }
 
@@ -118,7 +140,15 @@ abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
 
       //请求体
       if (_state == State.body) {
-        bool resolveBody = channelContext.currentRequest?.method != HttpMethod.head;
+        // HEAD 响应无 body；CONNECT 的 "200 Connection established" 应答也无
+        // body。两种来源都要识别：
+        //  - [pendingConnectResponse]：本端刚编码发出 CONNECT（如 App 内部重放走本地代理）；
+        //  - currentRequest == CONNECT：ProxyPin 串联上游代理时解码上游的 200。
+        // 这些响应必须走原有解析路径，不能按无 Content-Length 响应进 raw relay，否则 TLS 隧道被接管。
+        bool isConnectResponse = pendingConnectResponse ||
+            (this is HttpResponseCodec && channelContext.currentRequest?.method == HttpMethod.connect);
+
+        bool resolveBody = channelContext.currentRequest?.method != HttpMethod.head && !isConnectResponse;
         var bodyResult = resolveBody ? bodyReader!.readBody(data.readAvailableBytes()) : null;
         if (!resolveBody || bodyResult?.isDone == true) {
           _state = State.done;
@@ -136,6 +166,7 @@ abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
       if (_state == State.done) {
         result.data!.body = _convertBody(result.data!.body);
         _state = State.readInitial;
+        pendingConnectResponse = false; // CONNECT 应答已读完，自动消费
         result.isDone = true;
         return result;
       }
@@ -150,6 +181,25 @@ abstract class HttpCodec<T extends HttpMessage> implements Codec<T, T> {
   void init() {
     bodyReader = null;
     result = DecoderResult(isDone: false);
+  }
+
+  @override
+  DecoderResult<T>? finishCloseDelimitedBody() {
+    var reader = bodyReader;
+    if (reader == null || _state != State.body) {
+      return null;
+    }
+    var r = reader.finish();
+    if (!r.isDone) {
+      return null;
+    }
+    result.data!.body = _convertBody(r.body);
+    result.forward = null;
+    result.supportedParse = true;
+    result.isDone = true;
+    _state = State.readInitial;
+    pendingConnectResponse = false;
+    return result;
   }
 
   void initialLine(BytesBuilder buffer, T message);
@@ -290,7 +340,7 @@ class HttpServerCodec extends Codec<HttpRequest, HttpResponse> {
   }
 }
 
-class HttpClientCodec extends Codec<HttpResponse, HttpRequest> {
+class HttpClientCodec extends Codec<HttpResponse, HttpRequest> implements CloseDelimitedBodyFinalizer {
   HttpRequestCodec requestCodec = HttpRequestCodec();
   HttpResponseCodec responseCodec = HttpResponseCodec();
 
@@ -300,7 +350,17 @@ class HttpClientCodec extends Codec<HttpResponse, HttpRequest> {
   }
 
   @override
+  DecoderResult? finishCloseDelimitedBody() {
+    return responseCodec.finishCloseDelimitedBody();
+  }
+
+  @override
   List<int> encode(ChannelContext channelContext, HttpRequest data) {
+    // 编码 CONNECT 后，下一个响应是无 body 的 "200 Connection established"，
+    // 通知响应解码器内部标记，无需调用方设置/还原 currentRequest。
+    if (data.method == HttpMethod.connect) {
+      responseCodec.pendingConnectResponse = true;
+    }
     return requestCodec.encode(channelContext, data);
   }
 }
